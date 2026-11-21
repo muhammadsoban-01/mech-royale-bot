@@ -1,4 +1,4 @@
-"""Soban Tech - v14: v11 core + switchable experiments (FLAGS)."""
+"""Soban Tech - v15: v11 core + FLAGS (features) + PARAMS (numbers to tune)."""
 import json
 import math
 import os
@@ -47,6 +47,24 @@ FLAGS = {
     "drop_hold": False,      # earlier approach to supply drops and stand still inside the ring
     "early_loot": False,     # first 60 s: look up to 130 m for a special weapon (default 60 m)
     "mortar_pitch": False,   # fire mortar only when pitch has settled
+}
+
+# ---------------------------------------------------------------------------
+# TUNABLE NUMBERS.  Defaults = the v11 bot (3.33).  Scoring is deterministic, so change
+# ONE number per submission, compare the score, and keep it only if it goes up.
+PARAMS = {
+    "retreat_hp": 0.62,        # retreat to regen when HP ratio is below this after an enemy hit
+    "retreat_ticks": 60,       # how long (decisions of 0.1 s) to keep retreating
+    "duel_hp": 0.60,           # only duel 1v1 when HP ratio is above this
+    "finish_enemy_hp": 280.0,  # chase an enemy whose HP is at or below this
+    "ideal_range": 70.0,       # preferred fighting distance (gun/laser/mortar)
+    "ideal_range_lightning": 36.0,
+    "laser_release_yaw": 0.12, # release laser when aim error is below this (rad)
+    "laser_range": 200.0,      # start charging laser inside this distance
+    "gun_yaw_far": 0.14,       # gun aim tolerance beyond 95 m (rad)
+    "boost_energy": 40.0,      # min energy to boost while fighting/retreating
+    "orbit_frac": 0.75,        # zone waypoint radius as a fraction of next zone radius
+    "zone_margin": 16.0,       # become urgent when this close to the current zone edge (m)
 }
 
 PrismTuple = Tuple[float, float, float, float, float, float, List[float], List[List[float]]]
@@ -323,7 +341,7 @@ class GridWorld(SpatialWorld):
 
 
 class Bot:
-    name = "SobanTech-v14"
+    name = "SobanTech-v15"
 
     def __init__(self, hello: mf.Hello):
         self.slot = int(hello.get("slot", 0))
@@ -602,8 +620,8 @@ class Bot:
         else:
             self.last_threat_yaw = None
 
-        if hp_ratio < 0.62 and enemy_hit:
-            self.regen_retreat_ticks = 60
+        if hp_ratio < PARAMS["retreat_hp"] and enemy_hit:
+            self.regen_retreat_ticks = int(PARAMS["retreat_ticks"])
         elif self.regen_retreat_ticks > 0:
             self.regen_retreat_ticks -= 1
             if hp_ratio > 0.92:
@@ -663,13 +681,13 @@ class Bot:
         crad = float(zone["radius"])
 
         self.orbit_angle += 0.013 * self.orbit_dir
-        orbit_r = max(4.0, nrad * 0.75 - 6.0)
+        orbit_r = max(4.0, nrad * PARAMS["orbit_frac"] - 6.0)
         goal_x = ncx + math.cos(self.orbit_angle) * orbit_r
         goal_y = ncy + math.sin(self.orbit_angle) * orbit_r
 
         dist_curr_center = math.hypot(mx - ccx, my - ccy)
         dist_next_center = math.hypot(mx - ncx, my - ncy)
-        urgent_zone = (not in_zone) or (dist_curr_center > crad - 16.0) or (
+        urgent_zone = (not in_zone) or (dist_curr_center > crad - PARAMS["zone_margin"]) or (
             zone["shrink_start"] - t_sec < 10.0 and dist_next_center > nrad - 8.0
         )
 
@@ -743,13 +761,13 @@ class Bot:
             elif "mortar" in nweap and "laser" in my_kinds:
                 ideal_r = 110.0      # laser cooks off mortar from range
             else:
-                ideal_r = 36.0 if has_lightning else 70.0
+                ideal_r = PARAMS["ideal_range_lightning"] if has_lightning else PARAMS["ideal_range"]
 
             enemy_finishable = (
-                float(nearest.get("hp", 1000)) <= 280.0 and hp_ratio > 0.45 and len(enemies) <= 2 and not retreating
+                float(nearest.get("hp", 1000)) <= PARAMS["finish_enemy_hp"] and hp_ratio > 0.45 and len(enemies) <= 2 and not retreating
             )
             if enemy_finishable or (
-                len(enemies) == 1 and not retreating and hp_ratio > 0.60 and cubes >= int(nearest.get("cubes", 0))
+                len(enemies) == 1 and not retreating and hp_ratio > PARAMS["duel_hp"] and cubes >= int(nearest.get("cubes", 0))
             ):
                 radial = 0.55 if (enemy_finishable and edist > 25.0) else (
                     0.45 if edist > ideal_r + 12.0 else (-0.55 if edist < ideal_r - 10.0 else 0.0)
@@ -772,7 +790,7 @@ class Bot:
                     jump = True
                     self.jet_ticks = 7
             # boost only when it matters (save energy for dodge / zone / lightning)
-            boost = (nearest.get("charging", False) or (len(enemies) >= 2 and edist < 60.0) or retreating) and energy > 40.0
+            boost = (nearest.get("charging", False) or (len(enemies) >= 2 and edist < 60.0) or retreating) and energy > PARAMS["boost_energy"]
         else:
             nav_x, nav_y = goal_x, goal_y
             hold_drop = False
@@ -963,8 +981,8 @@ class Bot:
                             fire[slot_idx] = True
                         continue
                     if charge >= max_charge - 0.04:
-                        fire[slot_idx] = yaw_err >= 0.12  # hold until aligned, release to fire
-                    elif cd <= 0.0 and tdist <= 200.0:
+                        fire[slot_idx] = yaw_err >= PARAMS["laser_release_yaw"]  # hold until aligned, release to fire
+                    elif cd <= 0.0 and tdist <= PARAMS["laser_range"]:
                         fire[slot_idx] = True
                 elif wk == "lightning":
                     if not target_has_los:
@@ -983,7 +1001,7 @@ class Bot:
                     rel = float(w.get("reload", 0.0))
                     if rel == 0.0 and ammo == 0:
                         reload_gun = True
-                    elif target_has_los and cd <= 0.0 and rel == 0.0 and tdist <= 225.0 and yaw_err < (0.14 if tdist > 95.0 else 0.25):
+                    elif target_has_los and cd <= 0.0 and rel == 0.0 and tdist <= 225.0 and yaw_err < (PARAMS["gun_yaw_far"] if tdist > 95.0 else 0.25):
                         fire[slot_idx] = True
         else:
             mid_sounds = [s for s in obs.get("sounds", []) if s.get("dist") in ("near", "mid")]
@@ -1005,7 +1023,7 @@ class Bot:
             act["reload"] = True
 
         mf.draw.point([goal_x, goal_y, mz], "#40c0ff", 6)
-        mf.draw.label(f"v14 HP:{hp:.0f} C:{cubes}")
+        mf.draw.label(f"v15 HP:{hp:.0f} C:{cubes}")
         return act
 
 
