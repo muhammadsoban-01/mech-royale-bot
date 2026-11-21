@@ -1,4 +1,4 @@
-"""Soban Tech - v13: Zero-Bug Championship AI (Safe Rooftop Edge, Multi-Enemy Repulsion, Vulture Kill-Steal)."""
+"""Soban Tech - v14: Verified combat, zone movement, obstacle steering, and timing guard."""
 import json
 import math
 import os
@@ -181,7 +181,7 @@ class SpatialWorld:
 
 
 class Bot:
-    name = "SobanTech-v13"
+    name = "SobanTech-v14"
 
     def __init__(self, hello: mf.Hello):
         self.slot = int(hello.get("slot", 0))
@@ -217,9 +217,9 @@ class Bot:
         if not choices:
             return 0
         weights = {
-            "armor": 100, "regen": 98, "hp": 94, "health": 94, "speed": 90,
-            "energy": 86, "laser": 85, "lightning": 82, "gun_rate": 78,
-            "gun_dmg": 78, "mortar": 72, "sensors": 68,
+            "armor": 100, "regen": 97, "hp": 93, "health": 93, "speed": 89,
+            "energy": 85, "laser": 83, "lightning": 81, "gun_rate": 76,
+            "gun_dmg": 76, "mortar": 71, "sensors": 67,
         }
         best_i = 0
         best_score = -1
@@ -239,34 +239,30 @@ class Bot:
         return {"laser": 4, "lightning": 3, "mortar": 2, "gun": 1}.get(kind, 0)
 
     def _pick_safest_zone_point(self, mx, my, mz, ncx, ncy, nrad, enemies, sounds, default):
-        r_ring = max(4.0, nrad * 0.68 - 6.0)
+        r_ring = max(4.0, nrad * 0.75 - 6.0)
         best_x, best_y = default
         best_score = -1e9
         for k in range(12):
-            if self._elapsed_ms() > 18.0:
+            if self._elapsed_ms() > 20.0:
                 break
             ang = (2.0 * math.pi * k) / 12.0
             cx = ncx + math.cos(ang) * r_ring
             cy = ncy + math.sin(ang) * r_ring
             if self.geom.is_blocked_for_mech(cx, cy, mz):
                 continue
-            min_ed = 260.0
-            sum_threat = 0.0
+            min_ed = 250.0
             for e in enemies:
                 d = math.hypot(cx - float(e["pos"][0]), cy - float(e["pos"][1]))
                 if d < min_ed:
                     min_ed = d
-                if d < 140.0:
-                    sum_threat += (140.0 - d) * 0.45
             sound_pen = 0.0
             ang_from_me = math.atan2(cy - my, cx - mx)
             for sd in sounds:
                 if sd.get("dist") in ("near", "mid"):
                     if abs(angle_diff(ang_from_me, float(sd["bearing"]))) < 0.75:
                         sound_pen += 35.0 if sd.get("dist") == "near" else 15.0
-            roof_bonus = 22.0 if self.geom.get_climbable_roof_height(cx, cy, mz) is not None else 0.0
-            cont_bonus = math.cos(angle_diff(ang, self.orbit_angle)) * 16.0
-            sc = min(min_ed, 160.0) * 1.2 + cont_bonus + roof_bonus - sum_threat - sound_pen
+            cont_bonus = math.cos(angle_diff(ang, self.orbit_angle)) * 18.0
+            sc = min(min_ed, 160.0) * 1.2 + cont_bonus - sound_pen
             if sc > best_score:
                 best_score = sc
                 best_x, best_y = cx, cy
@@ -377,10 +373,10 @@ class Bot:
             if along < 0 or along > 285.0:
                 continue
             perp = -rx * uy + ry * ux
-            if abs(perp) < 7.2:
+            if abs(perp) < 7.0:
                 s = 1.0 if perp >= 0 else -1.0
-                dxs += -uy * s * 2.3
-                dys += ux * s * 2.3
+                dxs += -uy * s * 2.2
+                dys += ux * s * 2.2
                 found = True
         return dxs, dys, found
 
@@ -416,7 +412,7 @@ class Bot:
         if obs.get("offer"):
             act["pick"] = self._pick_upgrade(obs["offer"])
 
-        # 2. Damage & beam tracking
+        # 2. Damage and beam tracking (ignore zone damage for combat retreat)
         took_damage = False
         enemy_hit = False
         for ev in obs.get("events", []):
@@ -440,8 +436,8 @@ class Bot:
         else:
             self.last_threat_yaw = None
 
-        if hp_ratio < 0.64 and enemy_hit:
-            self.regen_retreat_ticks = 62
+        if hp_ratio < 0.62 and enemy_hit:
+            self.regen_retreat_ticks = 60
         elif self.regen_retreat_ticks > 0:
             self.regen_retreat_ticks -= 1
             if hp_ratio > 0.92:
@@ -464,7 +460,7 @@ class Bot:
             self.orbit_angle += 0.85 * self.orbit_dir
             self.stuck_ticks = 0
 
-        # 4. Weapon loot: Keep Gun in Slot 0, upgrade Slot 1
+        # 4. Weapon loot: keep gun in slot 0, upgrade slot 1
         pickups = obs.get("pickups", [])
         best_pickup = None
         best_pickup_prio = 0
@@ -492,7 +488,7 @@ class Bot:
                     act["take"] = best_pickup["id"]
                     act["drop"] = 1
 
-        # 5. Zone
+        # 5. Zone navigation
         zone = obs["zone"]
         ncx, ncy = float(zone["next_center"][0]), float(zone["next_center"][1])
         nrad = float(zone["next_radius"])
@@ -500,7 +496,7 @@ class Bot:
         crad = float(zone["radius"])
 
         self.orbit_angle += 0.013 * self.orbit_dir
-        orbit_r = max(4.0, nrad * 0.72 - 6.0)
+        orbit_r = max(4.0, nrad * 0.75 - 6.0)
         goal_x = ncx + math.cos(self.orbit_angle) * orbit_r
         goal_y = ncy + math.sin(self.orbit_angle) * orbit_r
 
@@ -527,7 +523,7 @@ class Bot:
             p for p in pickups
             if p["kind"] not in my_kinds
             and self._weapon_priority(p["kind"]) > max(slot1_prio, 1)
-            and math.hypot(p["pos"][0] - mx, p["pos"][1] - my) < 75.0
+            and math.hypot(p["pos"][0] - mx, p["pos"][1] - my) < 60.0
         ]
         on_roof = self.geom.is_on_rooftop(mx, my, mz)
 
@@ -567,62 +563,33 @@ class Bot:
             elif "mortar" in nweap and "laser" in my_kinds:
                 ideal_r = 110.0
             else:
-                ideal_r = 36.0 if has_lightning else 72.0
+                ideal_r = 36.0 if has_lightning else 70.0
 
-            enemy_finishable = (
-                float(nearest.get("hp", 1000)) <= 310.0 and hp_ratio > 0.45 and len(enemies) <= 2 and not retreating
-            )
-
-            if on_roof and dist_next_center < nrad - 12.0 and not enemy_finishable:
-                # 6.5m edge safety buffer so momentum never slides us off the rooftop
-                if self.geom.is_on_rooftop(mx + strafe_x * 6.5, my + strafe_y * 6.5, mz):
-                    move_x, move_y = strafe_x * 0.50, strafe_y * 0.50
-                else:
-                    self.strafe_dir *= -1.0
-                    move_x, move_y = -strafe_x * 0.45, -strafe_y * 0.45
-            elif enemy_finishable or (
-                len(enemies) == 1 and not retreating and hp_ratio > 0.58 and cubes >= int(nearest.get("cubes", 0))
-            ):
-                radial = 0.55 if (enemy_finishable and edist > 25.0) else (
-                    0.45 if edist > ideal_r + 12.0 else (-0.55 if edist < ideal_r - 10.0 else 0.0)
-                )
-                zx, zy, _ = norm2(goal_x - mx, goal_y - my)
-                z_w = 0.50 if dist_next_center > nrad - 14.0 else 0.25
-                move_x = strafe_x * 0.92 + to_ex * radial + zx * z_w
-                move_y = strafe_y * 0.92 + to_ey * radial + zy * z_w
+            if len(enemies) == 1 and not retreating and hp_ratio > 0.60 and cubes >= int(nearest.get("cubes", 0)):
+                radial = 0.45 if edist > ideal_r + 12.0 else (-0.55 if edist < ideal_r - 10.0 else 0.0)
             else:
-                rep_x, rep_y = 0.0, 0.0
-                for e in enemies[:4]:
-                    dx_e = mx - float(e["pos"][0])
-                    dy_e = my - float(e["pos"][1])
-                    d_e = max(math.hypot(dx_e, dy_e), 1.0)
-                    w_e = 1.0 / d_e
-                    rep_x += (dx_e / d_e) * w_e
-                    rep_y += (dy_e / d_e) * w_e
-                rx_n, ry_n, _ = norm2(rep_x, rep_y)
-                zx, zy, _ = norm2(goal_x - mx, goal_y - my)
-                z_w = 0.72 if (retreating or dist_next_center > nrad - 14.0) else 0.42
-                move_x = strafe_x * 0.65 + rx_n * 0.95 + zx * z_w
-                move_y = strafe_y * 0.65 + ry_n * 0.95 + zy * z_w
+                radial = -0.90
 
-            if not on_roof and (len(enemies) >= 2 or retreating) and me.get("grounded", False) and energy > 52.0:
+            zx, zy, _ = norm2(goal_x - mx, goal_y - my)
+            z_w = 0.65 if (retreating or dist_next_center > nrad - 14.0) else 0.28
+            move_x = strafe_x * 0.92 + to_ex * radial + zx * z_w
+            move_y = strafe_y * 0.92 + to_ey * radial + zy * z_w
+
+            if not on_roof and (len(enemies) >= 2 or retreating) and me.get("grounded", False) and energy > 55.0:
                 mdx, mdy, _ = norm2(move_x, move_y)
-                if (
-                    self.geom.get_climbable_roof_height(mx + mdx * 6.5, my + mdy * 6.5, mz) is not None
-                    or self.geom.get_climbable_roof_height(mx + mdx * 9.0, my + mdy * 9.0, mz) is not None
-                ):
+                if self.geom.get_climbable_roof_height(mx + mdx * 6.5, my + mdy * 6.5, mz) is not None:
                     jump = True
                     self.jet_ticks = 10
                     self.roof_ticks = 10
                 elif tick % 35 == 0:
                     jump = True
                     self.jet_ticks = 7
-            boost = (nearest.get("charging", False) or (len(enemies) >= 2 and edist < 65.0) or retreating) and energy > 36.0
+            boost = (nearest.get("charging", False) or (len(enemies) >= 2 and edist < 60.0) or retreating) and energy > 40.0
         else:
             nav_x, nav_y = goal_x, goal_y
             for d in obs.get("drops", []):
                 dd = math.hypot(d["pos"][0] - mx, d["pos"][1] - my)
-                if dd < 120.0 and d.get("lands_in", 99) <= 15.0 and d.get("holder") in (None, me["id"]):
+                if dd < 110.0 and d.get("lands_in", 99) <= 14.0 and d.get("holder") in (None, me["id"]):
                     if math.hypot(d["pos"][0] - ncx, d["pos"][1] - ncy) < nrad - 8.0:
                         nav_x, nav_y = float(d["pos"][0]), float(d["pos"][1])
                         captured_drop = True
@@ -633,41 +600,19 @@ class Bot:
                     sb = float(near_sounds[0]["bearing"])
                     nav_x = mx - math.cos(sb) * 42.0 + (ncx - mx) * 0.35
                     nav_y = my - math.sin(sb) * 42.0 + (ncy - my) * 0.35
-                elif visible_cubes and math.hypot(visible_cubes[0]["pos"][0] - mx, visible_cubes[0]["pos"][1] - my) < 75.0:
+                elif visible_cubes and math.hypot(visible_cubes[0]["pos"][0] - mx, visible_cubes[0]["pos"][1] - my) < 50.0:
                     if math.hypot(visible_cubes[0]["pos"][0] - ncx, visible_cubes[0]["pos"][1] - ncy) < nrad - 6.0:
                         nav_x, nav_y = float(visible_cubes[0]["pos"][0]), float(visible_cubes[0]["pos"][1])
                 elif useful_pickups:
                     near_p = min(useful_pickups, key=lambda p: math.hypot(p["pos"][0] - mx, p["pos"][1] - my))
                     nav_x, nav_y = float(near_p["pos"][0]), float(near_p["pos"][1])
-                elif t_sec < 85.0 and cubes < 11 and crates:
-                    if math.hypot(crates[0]["pos"][0] - mx, crates[0]["pos"][1] - my) < 85.0:
-                        if self.geom.has_shot_los(
-                            mx, my, muzzle_z, float(crates[0]["pos"][0]), float(crates[0]["pos"][1]), float(crates[0]["pos"][2]) + 1.5
-                        ):
-                            nav_x, nav_y = float(crates[0]["pos"][0]), float(crates[0]["pos"][1])
+                elif t_sec < 95.0 and cubes < 9 and crates:
+                    if math.hypot(crates[0]["pos"][0] - mx, crates[0]["pos"][1] - my) < 50.0:
+                        nav_x, nav_y = float(crates[0]["pos"][0]), float(crates[0]["pos"][1])
 
-            if on_roof and not captured_drop and not visible_cubes and dist_next_center < nrad - 12.0:
-                pat_ang = tick * 0.08
-                px, py = math.cos(pat_ang), math.sin(pat_ang)
-                if self.geom.is_on_rooftop(mx + px * 6.0, my + py * 6.0, mz):
-                    move_x, move_y = px * 0.35, py * 0.35
-                else:
-                    move_x, move_y = -px * 0.35, -py * 0.35
-            else:
-                move_x, move_y, _ = norm2(nav_x - mx, nav_y - my)
-                if not on_roof and t_sec > 75.0 and me.get("grounded", False) and energy > 65.0:
-                    mdx, mdy, _ = norm2(move_x, move_y)
-                    if (
-                        self.geom.get_climbable_roof_height(mx + mdx * 6.5, my + mdy * 6.5, mz) is not None
-                        or self.geom.get_climbable_roof_height(mx + mdx * 9.0, my + mdy * 9.0, mz) is not None
-                    ):
-                        jump = True
-                        self.jet_ticks = 10
-                        self.roof_ticks = 10
+            move_x, move_y, _ = norm2(nav_x - mx, nav_y - my)
+            boost = (took_damage or captured_drop) and energy > 28.0
 
-            boost = (took_damage or captured_drop or (t_sec < 65.0 and cubes < 8 and energy > 55.0)) and energy > 28.0
-
-        # Projectile dodge
         dx_dodge, dy_dodge = self._dodge_vector(me, obs.get("projectiles", []))
         if dx_dodge != 0.0 or dy_dodge != 0.0:
             move_x += dx_dodge * 1.5
@@ -675,7 +620,6 @@ class Bot:
             if energy > 28.0:
                 boost = True
 
-        # Laser dodge
         lx, ly, laser_threat = self._laser_dodge(me, all_actors)
         if laser_threat:
             move_x += lx
@@ -683,22 +627,17 @@ class Bot:
             if energy > 20.0:
                 boost = True
 
-        # Wall steering
         if self.roof_ticks > 0:
             self.roof_ticks -= 1
-        elif on_roof and urgent_zone:
-            mm = math.hypot(move_x, move_y)
-            if mm > 1.0:
-                move_x, move_y = move_x / mm, move_y / mm
         elif math.hypot(move_x, move_y) > 0.05 and self._elapsed_ms() < 25.0:
             sx, sy, need_jump = self.geom.steer_clear(mx, my, mz, move_x, move_y)
             move_x, move_y = sx, sy
             if need_jump and self.jet_ticks == 0:
                 self.jet_ticks = 6
-        else:
-            mm = math.hypot(move_x, move_y)
-            if mm > 1.0:
-                move_x, move_y = move_x / mm, move_y / mm
+
+        mm = math.hypot(move_x, move_y)
+        if mm > 1.0:
+            move_x, move_y = move_x / mm, move_y / mm
 
         if self.jet_ticks > 0:
             self.jet_ticks -= 1
@@ -711,33 +650,31 @@ class Bot:
         act["boost"] = boost
         act["jump"] = jump
 
-        # 8. Targeting & Vulture Kill-Steal
+        # 8. Targeting
         primary_target: Optional[Dict[str, Any]] = None
         target_has_los = False
 
         if enemies:
             los_enemies = []
-            for e in enemies[:4]:
+            for e in enemies[:3]:
                 if self._elapsed_ms() > 32.0:
                     break
                 if self.geom.has_shot_los(mx, my, muzzle_z, float(e["pos"][0]), float(e["pos"][1]), float(e["pos"][2]) + 4.5):
                     los_enemies.append(e)
             if los_enemies:
-                low_hp_los = [e for e in los_enemies if float(e.get("hp", 1000)) <= 320.0]
-                pool = low_hp_los if low_hp_los else los_enemies
                 primary_target = min(
-                    pool,
+                    los_enemies,
                     key=lambda m: float(m.get("hp", 1000)) * 0.45 + math.hypot(m["pos"][0] - mx, m["pos"][1] - my) * 0.55,
                 )
                 target_has_los = True
             else:
                 primary_target = enemies[0]
                 target_has_los = False
-        elif npcs and hp_ratio > 0.52 and cubes < 12 and math.hypot(npcs[0]["pos"][0] - mx, npcs[0]["pos"][1] - my) < 75.0:
+        elif npcs and hp_ratio > 0.55 and cubes < 10 and math.hypot(npcs[0]["pos"][0] - mx, npcs[0]["pos"][1] - my) < 60.0:
             if self.geom.has_shot_los(mx, my, muzzle_z, float(npcs[0]["pos"][0]), float(npcs[0]["pos"][1]), float(npcs[0]["pos"][2]) + 1.8):
                 primary_target = npcs[0]
                 target_has_los = True
-        elif crates and t_sec < 95.0 and cubes < 11 and math.hypot(crates[0]["pos"][0] - mx, crates[0]["pos"][1] - my) < 60.0:
+        elif crates and t_sec < 100.0 and cubes < 9 and math.hypot(crates[0]["pos"][0] - mx, crates[0]["pos"][1] - my) < 42.0:
             if self.geom.has_shot_los(mx, my, muzzle_z, float(crates[0]["pos"][0]), float(crates[0]["pos"][1]), float(crates[0]["pos"][2]) + 1.5):
                 c_target = dict(crates[0])
                 c_target["kind"] = "crate"
@@ -756,10 +693,7 @@ class Bot:
                 else weapons[0]
             )
             aim = self._compute_aim(me, primary_target, aim_weapon)
-            if not target_has_los and self.last_threat_yaw is not None and self.threat_timer >= 15:
-                act["aim"] = [round(self.last_threat_yaw, 4), 0.0]
-            else:
-                act["aim"] = [round(aim[0], 4), round(aim[1], 4)]
+            act["aim"] = [round(aim[0], 4), round(aim[1], 4)]
 
             yaw_err = abs(angle_diff(aim[0], float(me["aim"][0])))
             for slot_idx in (0, 1):
@@ -779,8 +713,8 @@ class Bot:
                             fire[slot_idx] = True
                         continue
                     if charge >= max_charge - 0.04:
-                        fire[slot_idx] = yaw_err >= 0.20
-                    elif cd <= 0.0 and tdist <= 235.0:
+                        fire[slot_idx] = yaw_err >= 0.12
+                    elif cd <= 0.0 and tdist <= 200.0:
                         fire[slot_idx] = True
                 elif wk == "lightning":
                     if not target_has_los:
@@ -790,7 +724,7 @@ class Bot:
                 elif wk == "mortar":
                     if is_crate:
                         continue
-                    if cd <= 0.0 and 22.0 <= tdist <= 220.0 and yaw_err < 0.25:
+                    if cd <= 0.0 and 18.0 <= tdist <= 220.0 and yaw_err < 0.25:
                         fire[slot_idx] = True
                 elif wk == "gun":
                     ammo = int(w.get("ammo", 0))
@@ -819,7 +753,7 @@ class Bot:
             act["reload"] = True
 
         mf.draw.point([goal_x, goal_y, mz], "#40c0ff", 6)
-        mf.draw.label(f"SobanTech-v13 | HP:{hp:.0f} | C:{cubes}")
+        mf.draw.label(f"SobanTech-v14 | HP:{hp:.0f} | C:{cubes}")
         return act
 
 
