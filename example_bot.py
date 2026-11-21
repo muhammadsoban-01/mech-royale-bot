@@ -1,4 +1,4 @@
-"""Soban Tech - v7: timing-guarded, laser dodge, keep-gun, weapon triangle, death logging."""
+"""Soban Tech - v14: v11 core + switchable experiments (FLAGS)."""
 import json
 import math
 import os
@@ -38,13 +38,15 @@ def point_in_poly(x: float, y: float, ring: List[float]) -> bool:
     return inside
 
 
-# Feature switches: set one to False to A/B test it without touching logic.
+# ---------------------------------------------------------------------------
+# EXPERIMENT SWITCHES.  All False = exactly the v11 bot that scored 3.33.
+# Flip ONE switch per submission, compare the score, keep it only if it helps.
 FLAGS = {
-    "safe_sector": True,       # choose zone waypoint away from enemies/sounds
-    "roof_escape": True,       # jet onto low roofs when outnumbered / retreating
-    "finishable_chase": True,  # chase enemies with HP <= 280
-    "early_loot": True,        # first 60 s: look farther for a special weapon
-    "status_log": True,        # status line to stderr every 10 s
+    "grid_geometry": False,  # fast 1 m raster for wall/LOS checks (same decisions, ~100x faster on big buildings)
+    "loot_fixes": False,     # pickups only inside next zone, skip roof items, give up after 15 s on one target
+    "drop_hold": False,      # earlier approach to supply drops and stand still inside the ring
+    "early_loot": False,     # first 60 s: look up to 130 m for a special weapon (default 60 m)
+    "mortar_pitch": False,   # fire mortar only when pitch has settled
 }
 
 PrismTuple = Tuple[float, float, float, float, float, float, List[float], List[List[float]]]
@@ -319,8 +321,9 @@ class GridWorld(SpatialWorld):
         return True
 
 
+
 class Bot:
-    name = "SobanTech-v13"
+    name = "SobanTech-v14"
 
     def __init__(self, hello: mf.Hello):
         self.slot = int(hello.get("slot", 0))
@@ -329,10 +332,13 @@ class Bot:
         cfg = hello.get("config", {})
         self.pickup_r = float(cfg.get("loot", {}).get("pickup_radius", 4.0))
         map_dir = hello.get("map", {}).get("dir", "/arena")
-        try:
-            self.geom = GridWorld(map_dir)
-        except Exception as ex:  # fall back to exact polygon geometry
-            mf.log("GridWorld failed, using SpatialWorld:", repr(ex))
+        if FLAGS["grid_geometry"]:
+            try:
+                self.geom = GridWorld(map_dir)
+            except Exception as ex:
+                mf.log("GridWorld failed, using SpatialWorld:", repr(ex))
+                self.geom = SpatialWorld(map_dir)
+        else:
             self.geom = SpatialWorld(map_dir)
         try:
             mf.log("upgrade ids:", [u.get("id") for u in cfg.get("upgrades", [])])
@@ -607,7 +613,7 @@ class Bot:
         # 3. stuck recovery
         if self.last_pos is not None:
             moved = math.hypot(mx - self.last_pos[0], my - self.last_pos[1])
-            if moved < 0.22 and self.last_cmd_mag > 0.45:
+            if moved < 0.22 and (self.last_cmd_mag > 0.45 or not FLAGS["drop_hold"]):
                 self.stuck_ticks += 1
             else:
                 self.stuck_ticks = max(0, self.stuck_ticks - 1)
@@ -686,18 +692,22 @@ class Bot:
             if p["kind"] not in my_kinds
             and self._weapon_priority(p["kind"]) > max(slot1_prio, 1)
             and math.hypot(p["pos"][0] - mx, p["pos"][1] - my) < loot_range
-            and math.hypot(p["pos"][0] - ncx, p["pos"][1] - ncy) < nrad - 6.0
-            and abs(p["pos"][2] - mz) <= 4.5
-            and self.blacklist.get(int(p["id"]), -1) < tick
         ]
+        if FLAGS["loot_fixes"]:
+            useful_pickups = [
+                p for p in useful_pickups
+                if math.hypot(p["pos"][0] - ncx, p["pos"][1] - ncy) < nrad - 6.0
+                and abs(p["pos"][2] - mz) <= 4.5
+                and self.blacklist.get(int(p["id"]), -1) < tick
+            ]
         on_roof = self.geom.is_on_rooftop(mx, my, mz)
-        if FLAGS["status_log"] and tick % 100 == 0:
+        if tick % 100 == 0:
             mf.log(
                 f"S t={t_sec:.0f} alive={obs.get('alive')} hp={hp:.0f} cubes={cubes} "
                 f"w={[w['kind'] if w else None for w in weapons]} seen={len(enemies)} roof={on_roof} "
                 f"zone={'in' if in_zone else 'OUT'} max_ms={self.max_ms:.1f} slow={self.slow}"
             )
-        if FLAGS["safe_sector"] and (enemies or obs.get("sounds")):
+        if enemies or obs.get("sounds"):
             goal_x, goal_y = self._pick_safest_zone_point(
                 mx, my, mz, ncx, ncy, nrad, enemies, obs.get("sounds", []), (goal_x, goal_y)
             )
@@ -735,7 +745,7 @@ class Bot:
             else:
                 ideal_r = 36.0 if has_lightning else 70.0
 
-            enemy_finishable = FLAGS["finishable_chase"] and (
+            enemy_finishable = (
                 float(nearest.get("hp", 1000)) <= 280.0 and hp_ratio > 0.45 and len(enemies) <= 2 and not retreating
             )
             if enemy_finishable or (
@@ -752,7 +762,7 @@ class Bot:
             move_x = strafe_x * 0.92 + to_ex * radial + zx * z_w
             move_y = strafe_y * 0.92 + to_ey * radial + zy * z_w
 
-            if FLAGS["roof_escape"] and not on_roof and (len(enemies) >= 2 or retreating) and me.get("grounded", False) and energy > 55.0:
+            if not on_roof and (len(enemies) >= 2 or retreating) and me.get("grounded", False) and energy > 55.0:
                 mdx, mdy, _ = norm2(move_x, move_y)
                 if self.geom.get_climbable_roof_height(mx + mdx * 6.5, my + mdy * 6.5, mz) is not None:
                     jump = True
@@ -765,72 +775,88 @@ class Bot:
             boost = (nearest.get("charging", False) or (len(enemies) >= 2 and edist < 60.0) or retreating) and energy > 40.0
         else:
             nav_x, nav_y = goal_x, goal_y
-            walk_speed = float(me.get("stats", {}).get("walk_speed", 11.7))
             hold_drop = False
             drop_dist = 0.0
             drop_landed = False
-            for d in obs.get("drops", []):
-                if d.get("holder") not in (None, me["id"]):
-                    continue
-                dd = math.hypot(d["pos"][0] - mx, d["pos"][1] - my)
-                lands = float(d.get("lands_in", 99.0))
-                ring_r = float(d.get("radius", 8.0))
-                travel = dd / max(walk_speed, 1.0)
-                if lands > 24.0 or travel > lands + 10.0 or lands > travel + 6.0:
-                    continue  # too far to make it, or too early to leave cover
-                if math.hypot(d["pos"][0] - ncx, d["pos"][1] - ncy) >= nrad - 8.0:
-                    continue
-                nav_x, nav_y = float(d["pos"][0]), float(d["pos"][1])
-                captured_drop = True
-                drop_dist = dd
-                drop_landed = lands <= 0.0
-                hold_drop = dd < ring_r * 0.45  # inside the ring: stand still, capture needs 4 s alone
-                break
+            if FLAGS["drop_hold"]:
+                walk_speed = float(me.get("stats", {}).get("walk_speed", 11.7))
+                for d in obs.get("drops", []):
+                    if d.get("holder") not in (None, me["id"]):
+                        continue
+                    dd = math.hypot(d["pos"][0] - mx, d["pos"][1] - my)
+                    lands = float(d.get("lands_in", 99.0))
+                    ring_r = float(d.get("radius", 8.0))
+                    travel = dd / max(walk_speed, 1.0)
+                    if lands > 24.0 or travel > lands + 10.0 or lands > travel + 6.0:
+                        continue
+                    if math.hypot(d["pos"][0] - ncx, d["pos"][1] - ncy) >= nrad - 8.0:
+                        continue
+                    nav_x, nav_y = float(d["pos"][0]), float(d["pos"][1])
+                    captured_drop = True
+                    drop_dist = dd
+                    drop_landed = lands <= 0.0
+                    hold_drop = dd < ring_r * 0.45
+                    break
+            else:
+                for d in obs.get("drops", []):
+                    dd = math.hypot(d["pos"][0] - mx, d["pos"][1] - my)
+                    if dd < 110.0 and d.get("lands_in", 99) <= 14.0 and d.get("holder") in (None, me["id"]):
+                        if math.hypot(d["pos"][0] - ncx, d["pos"][1] - ncy) < nrad - 8.0:
+                            nav_x, nav_y = float(d["pos"][0]), float(d["pos"][1])
+                            captured_drop = True
+                            break
 
             chase_target_id: Optional[int] = None
             if not captured_drop:
-                vis_cubes = [
-                    c for c in visible_cubes
-                    if abs(c["pos"][2] - mz) <= 4.5 and self.blacklist.get(int(c["id"]), -1) < tick
-                ]
-                if near_sounds and hp_ratio < 0.72:
-                    sb = float(near_sounds[0]["bearing"])
-                    nav_x = mx - math.cos(sb) * 42.0 + (ncx - mx) * 0.35
-                    nav_y = my - math.sin(sb) * 42.0 + (ncy - my) * 0.35
-                elif vis_cubes and math.hypot(vis_cubes[0]["pos"][0] - mx, vis_cubes[0]["pos"][1] - my) < 50.0 \
-                        and math.hypot(vis_cubes[0]["pos"][0] - ncx, vis_cubes[0]["pos"][1] - ncy) < nrad - 6.0:
-                    nav_x, nav_y = float(vis_cubes[0]["pos"][0]), float(vis_cubes[0]["pos"][1])
-                    chase_target_id = int(vis_cubes[0]["id"])
-                elif useful_pickups:
-                    near_p = min(useful_pickups, key=lambda p: math.hypot(p["pos"][0] - mx, p["pos"][1] - my))
-                    nav_x, nav_y = float(near_p["pos"][0]), float(near_p["pos"][1])
-                    chase_target_id = int(near_p["id"])
-                elif t_sec < 95.0 and cubes < 9 and crates:
+                if FLAGS["loot_fixes"]:
+                    vis_cubes = [
+                        c for c in visible_cubes
+                        if abs(c["pos"][2] - mz) <= 4.5 and self.blacklist.get(int(c["id"]), -1) < tick
+                    ]
                     ok_crates = [
                         c for c in crates
                         if abs(c["pos"][2] - mz) <= 4.5 and self.blacklist.get(int(c["id"]), -1) < tick
                     ]
-                    if ok_crates and math.hypot(ok_crates[0]["pos"][0] - mx, ok_crates[0]["pos"][1] - my) < 50.0:
+                else:
+                    vis_cubes = visible_cubes
+                    ok_crates = crates
+                if near_sounds and hp_ratio < 0.72:
+                    sb = float(near_sounds[0]["bearing"])
+                    nav_x = mx - math.cos(sb) * 42.0 + (ncx - mx) * 0.35
+                    nav_y = my - math.sin(sb) * 42.0 + (ncy - my) * 0.35
+                elif vis_cubes and math.hypot(vis_cubes[0]["pos"][0] - mx, vis_cubes[0]["pos"][1] - my) < 50.0:
+                    if math.hypot(vis_cubes[0]["pos"][0] - ncx, vis_cubes[0]["pos"][1] - ncy) < nrad - 6.0:
+                        nav_x, nav_y = float(vis_cubes[0]["pos"][0]), float(vis_cubes[0]["pos"][1])
+                        chase_target_id = int(vis_cubes[0]["id"])
+                elif useful_pickups:
+                    near_p = min(useful_pickups, key=lambda p: math.hypot(p["pos"][0] - mx, p["pos"][1] - my))
+                    nav_x, nav_y = float(near_p["pos"][0]), float(near_p["pos"][1])
+                    chase_target_id = int(near_p["id"])
+                elif t_sec < 95.0 and cubes < 9 and ok_crates:
+                    if math.hypot(ok_crates[0]["pos"][0] - mx, ok_crates[0]["pos"][1] - my) < 50.0:
                         nav_x, nav_y = float(ok_crates[0]["pos"][0]), float(ok_crates[0]["pos"][1])
                         chase_target_id = int(ok_crates[0]["id"])
 
-            # loop breaker: give up on a target we have chased for 15 s without reaching it
-            if chase_target_id is None:
-                self.chase_id = None
-            elif chase_target_id != self.chase_id:
-                self.chase_id = chase_target_id
-                self.chase_start = tick
-            elif tick - self.chase_start > 300:
-                self.blacklist[chase_target_id] = tick + 1200
-                self.chase_id = None
+            if FLAGS["loot_fixes"]:
+                if chase_target_id is None:
+                    self.chase_id = None
+                elif chase_target_id != self.chase_id:
+                    self.chase_id = chase_target_id
+                    self.chase_start = tick
+                elif tick - self.chase_start > 300:
+                    self.blacklist[chase_target_id] = tick + 1200
+                    self.chase_id = None
 
             if hold_drop:
                 move_x, move_y = 0.0, 0.0
             else:
                 move_x, move_y, _ = norm2(nav_x - mx, nav_y - my)
-            boost = (took_damage and energy > 28.0) or (
-                captured_drop and not hold_drop and drop_landed and drop_dist > 40.0 and energy > 60.0
-            )
+            if FLAGS["drop_hold"]:
+                boost = (took_damage and energy > 28.0) or (
+                    captured_drop and not hold_drop and drop_landed and drop_dist > 40.0 and energy > 60.0
+                )
+            else:
+                boost = (took_damage or captured_drop) and energy > 28.0
 
         # projectile dodge
         dx_dodge, dy_dodge = self._dodge_vector(me, obs.get("projectiles", []))
@@ -948,7 +974,9 @@ class Bot:
                 elif wk == "mortar":
                     if is_crate:
                         continue
-                    if cd <= 0.0 and 24.0 <= tdist <= 215.0 and yaw_err < 0.25 and abs(aim[1] - float(me["aim"][1])) < 0.12:
+                    if cd <= 0.0 and 18.0 <= tdist <= 220.0 and yaw_err < 0.25 and (
+                        not FLAGS["mortar_pitch"] or abs(aim[1] - float(me["aim"][1])) < 0.12
+                    ):
                         fire[slot_idx] = True
                 elif wk == "gun":
                     ammo = int(w.get("ammo", 0))
@@ -977,7 +1005,7 @@ class Bot:
             act["reload"] = True
 
         mf.draw.point([goal_x, goal_y, mz], "#40c0ff", 6)
-        mf.draw.label(f"v13 HP:{hp:.0f} C:{cubes}")
+        mf.draw.label(f"v14 HP:{hp:.0f} C:{cubes}")
         return act
 
 
